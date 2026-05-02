@@ -1,0 +1,18 @@
+{
+  "name": "order-processor",
+  "version": "1.0.0",
+  "scripts": {
+    "dev": "ts-node-dev --respawn src/worker.ts",
+    "build": "tsc",
+    "start": "node dist/worker.js"
+  },
+  "dependencies": {
+    "amqplib": "^0.10.4"
+  },
+  "devDependencies": {
+    "@types/amqplib": "^0.10.5",
+    "@types/node": "^20.14.0",
+    "ts-node-dev": "^2.0.0",
+    "typescript": "^5.4.5"
+  }
+}
