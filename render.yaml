@@ -9,14 +9,14 @@ services:
       - key: REDIS_HOST
         fromService:
           name: redis-internal
-          type: pvt
+          type: pserv
           property: host
       - key: REDIS_PORT
         value: "6379"
       - key: RABBITMQ_HOST
         fromService:
           name: rabbitmq-internal
-          type: pvt
+          type: pserv
           property: host
       - key: RABBITMQ_PORT
         value: "5672"
@@ -35,7 +35,7 @@ services:
       - key: RABBITMQ_HOST
         fromService:
           name: rabbitmq-internal
-          type: pvt
+          type: pserv
           property: host
       - key: RABBITMQ_PORT
         value: "5672"
@@ -45,22 +45,22 @@ services:
         value: guest
 
   # ── Redis (private — never exposed to the internet) ──────────────────────
-  - type: pvt
+  - type: pserv
     name: redis-internal
-    runtime: docker
+    runtime: image
     image:
-      url: docker.io/redis:7-alpine
+      url: redis:7-alpine
 
   # ── RabbitMQ (private) ───────────────────────────────────────────────────
   # NOTE: Without a Persistent Disk the queue is in-memory only.
   # Messages are lost on restart — acceptable for a portfolio POC.
   # Production fix: attach a Render Persistent Disk and use RabbitMQ's
   # durable queue + message persistence features.
-  - type: pvt
+  - type: pserv
     name: rabbitmq-internal
-    runtime: docker
+    runtime: image
     image:
-      url: docker.io/rabbitmq:3-management
+      url: rabbitmq:3-management
     envVars:
       - key: RABBITMQ_DEFAULT_USER
         value: guest
