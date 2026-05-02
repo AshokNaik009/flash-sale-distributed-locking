@@ -2,20 +2,26 @@
 
 A minimal but production-shaped demo of how to prevent **inventory overselling** under high concurrency using Redis distributed locks and RabbitMQ for async order processing.
 
+**Live deployment** (Render free tier):
+- API → https://flash-sale-api-y407.onrender.com
+- Worker → https://order-processor-mxcq.onrender.com
+
+> Free-tier services spin down after ~15 min of inactivity — first request wakes them and takes ~30 s.
+
 ## Architecture
 
 ```
 Browser / k6 load-test
         │
         ▼
- ┌─────────────┐   Redis SET NX   ┌───────────────────┐
- │  Flash Sale │ ◄──────────────► │  Redis (lock +    │
- │     API     │                  │   inventory store) │
- └──────┬──────┘                  └───────────────────┘
+ ┌─────────────┐   Redis SET NX   ┌─────────────────────┐
+ │  Flash Sale │ ◄──────────────► │  Render Key Value   │
+ │     API     │                  │ (lock + inventory)  │
+ └──────┬──────┘                  └─────────────────────┘
         │ publish order
         ▼
  ┌──────────────┐
- │   RabbitMQ   │  "orders" queue   (CloudAMQP free tier)
+ │   CloudAMQP  │  "orders" queue   (free Little Lemur tier)
  └──────┬───────┘
         │ consume
         ▼
@@ -31,6 +37,10 @@ Browser / k6 load-test
 ### Why CloudAMQP instead of self-hosting RabbitMQ?
 
 Render private services (`pserv`) require a paid plan. CloudAMQP's "Little Lemur" plan gives a free managed AMQP broker (1 M msgs/month, 20 connections), reachable from anywhere via TLS.
+
+### Why the worker is a `web` service, not a `background_worker`
+
+Render's `background_worker` type is paid only. To stay on the free tier, the consumer is deployed as a `web` service that runs the AMQP consumer loop **and** exposes a tiny `/health` endpoint to satisfy Render's health checks.
 
 ---
 
@@ -56,51 +66,75 @@ Worker logs (`docker-compose logs -f worker`) will show orders being consumed fr
 
 ## Deploy to Render — fully on the free tier (no credit card)
 
-> **Why not Blueprint?** Render's Blueprint flow forces a card on file even when every service in it is free. We avoid that by creating each service manually through the dashboard with the **Node native runtime** (Docker runtime also requires a card; Node native does not).
+> **Why not Blueprint?** Render's Blueprint flow requires a card on file even when every service in it is free. Same for Docker runtime. We use the **Node native runtime** + create services individually (via CLI or dashboard) to stay free.
 
-### 1. Create the Redis (Render Key Value)
+### Prerequisites
 
-- Dashboard → **New → Key Value**
-- Plan: **Free** (25 MB)
-- Region: pick the one closest to where your other services will live
-- Copy the **Internal Connection String** (looks like `redis://red-xxxxx:6379`) — you'll need it in step 2
+1. **CloudAMQP** account → create a free **Little Lemur** instance → copy the AMQP URL (looks like `amqps://user:pass@host.lmq.cloudamqp.com/vhost`).
+2. **Render CLI** installed and logged in:
+   ```bash
+   curl -fsSL https://github.com/render-oss/cli/releases/latest/download/cli_install.sh | sh
+   render login
+   render workspace set <your-workspace-id>
+   ```
 
-### 2. Create the API web service
+### 1. Create the Render Key Value (dashboard — CLI doesn't support this type)
 
-- Dashboard → **New → Web Service** → connect this GitHub repo
-- Settings:
-  - **Name:** `flash-sale-api`
-  - **Region:** same as Key Value
-  - **Branch:** `main`
-  - **Root Directory:** `api`
-  - **Runtime:** `Node`
-  - **Build Command:** `npm install && npm run build`
-  - **Start Command:** `npm start`
-  - **Plan:** Free
-- **Environment variables:**
-  - `REDIS_URL` → paste the Key Value internal connection string
-  - `RABBITMQ_URL` → your CloudAMQP `amqps://...` URL
+- https://dashboard.render.com/new/redis
+- **Name:** `flash-sale-redis`
+- **Region:** Oregon (or wherever your other services live)
+- **Plan:** Free (25 MB)
+- Copy the **Internal Connection String** (e.g. `redis://red-xxxxx:6379`)
 
-### 3. Create the worker as a second web service
+### 2. Create both web services via CLI
 
-> Background workers (`type: worker`) require a paid plan, so we deploy the consumer as a `web` service. It exposes a tiny `/health` endpoint to satisfy Render's health checks while the AMQP consumer runs in the background.
+```bash
+# API
+render services create \
+  --type web_service \
+  --name flash-sale-api \
+  --runtime node \
+  --repo https://github.com/<you>/flash-sale-distributed-locking \
+  --branch main \
+  --root-directory api \
+  --build-command "npm install && npm run build" \
+  --start-command "npm start" \
+  --plan free \
+  --region oregon \
+  --health-check-path /health \
+  --env-var "REDIS_URL=redis://red-xxxxx:6379" \
+  --env-var "RABBITMQ_URL=amqps://user:pass@host.lmq.cloudamqp.com/vhost" \
+  --output json --confirm
 
-- Dashboard → **New → Web Service** → same repo
-- Settings:
-  - **Name:** `order-processor`
-  - **Root Directory:** `worker`
-  - **Runtime:** `Node`
-  - **Build Command:** `npm install && npm run build`
-  - **Start Command:** `npm start`
-  - **Plan:** Free
-- **Environment variables:**
-  - `RABBITMQ_URL` → same CloudAMQP URL
+# Worker
+render services create \
+  --type web_service \
+  --name order-processor \
+  --runtime node \
+  --repo https://github.com/<you>/flash-sale-distributed-locking \
+  --branch main \
+  --root-directory worker \
+  --build-command "npm install && npm run build" \
+  --start-command "npm start" \
+  --plan free \
+  --region oregon \
+  --health-check-path /health \
+  --env-var "RABBITMQ_URL=amqps://user:pass@host.lmq.cloudamqp.com/vhost" \
+  --output json --confirm
+```
+
+### 3. Watch the deploy
+
+```bash
+render deploys list <service-id>      # status
+render logs <service-id> --tail        # live logs
+```
 
 ### Free-tier caveats
 
-- Free web services **spin down after ~15 min of inactivity** — first request after sleep takes ~30 s.
-- Free Key Value caps at **25 MB** — fine for locks + counters.
-- CloudAMQP "Little Lemur" gives **20 concurrent connections / 1 M msgs/month**.
+- Web services **spin down after ~15 min of inactivity** — first request after sleep takes ~30 s.
+- Key Value caps at **25 MB** — fine for locks + counters, not for full caches.
+- CloudAMQP "Little Lemur" allows **20 concurrent connections / 1 M msgs/month**.
 
 ---
 
@@ -113,7 +147,7 @@ import { check } from "k6";
 export const options = { vus: 50, iterations: 200 };
 
 export default function () {
-  const res = http.post("http://localhost:3000/buy/sneaker-001?userId=user-" + __VU);
+  const res = http.post("https://flash-sale-api-y407.onrender.com/buy/sneaker-001?userId=user-" + __VU);
   check(res, {
     "bought, sold-out, or locked": (r) => [200, 409, 429].includes(r.status),
   });
