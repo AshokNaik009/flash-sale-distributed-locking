@@ -5,16 +5,12 @@ import { randomUUID } from "crypto";
 
 const app = Fastify({ logger: true });
 
-const redis = new Redis({
-  host: process.env.REDIS_HOST ?? "localhost",
-  port: Number(process.env.REDIS_PORT ?? 6379),
-});
+// Render Key Value gives a connection URL via REDIS_URL.
+// Locally docker-compose sets it to redis://redis:6379.
+const redis = new Redis(process.env.REDIS_URL ?? "redis://localhost:6379");
 
-const RABBITMQ_URL =
-  `amqp://${process.env.RABBITMQ_USER ?? "guest"}:` +
-  `${process.env.RABBITMQ_PASS ?? "guest"}@` +
-  `${process.env.RABBITMQ_HOST ?? "localhost"}:` +
-  `${process.env.RABBITMQ_PORT ?? 5672}`;
+// CloudAMQP gives a full amqps:// URL via RABBITMQ_URL.
+const RABBITMQ_URL = process.env.RABBITMQ_URL ?? "amqp://guest:guest@localhost:5672";
 
 const LOCK_TTL_MS = 10_000;
 const QUEUE_NAME = "orders";

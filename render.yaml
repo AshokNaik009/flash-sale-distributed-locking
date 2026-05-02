@@ -1,68 +1,35 @@
 services:
+  # ── Redis (Render Key Value — free managed tier) ─────────────────────────
+  - type: keyvalue
+    name: flash-sale-redis
+    plan: free
+    ipAllowList: []   # empty = only Render services on the same workspace can connect
+
   # ── Public API ───────────────────────────────────────────────────────────
   - type: web
     name: flash-sale-api
     runtime: docker
     dockerfilePath: ./api/Dockerfile
     dockerContext: ./api
+    plan: free
     envVars:
-      - key: REDIS_HOST
+      - key: REDIS_URL
         fromService:
-          name: redis-internal
-          type: pserv
-          property: host
-      - key: REDIS_PORT
-        value: "6379"
-      - key: RABBITMQ_HOST
-        fromService:
-          name: rabbitmq-internal
-          type: pserv
-          property: host
-      - key: RABBITMQ_PORT
-        value: "5672"
-      - key: RABBITMQ_USER
-        value: guest
-      - key: RABBITMQ_PASS
-        value: guest
+          name: flash-sale-redis
+          type: keyvalue
+          property: connectionString
+      - key: RABBITMQ_URL
+        sync: false   # set in dashboard after CloudAMQP signup (e.g. amqps://user:pass@xxx.cloudamqp.com/vhost)
 
-  # ── Background Worker ────────────────────────────────────────────────────
-  - type: worker
+  # ── Worker (deployed as a 'web' service to stay on free tier) ────────────
+  # Background workers require a paid plan, so we deploy this as a free web
+  # service that runs the consumer loop AND exposes a tiny /health endpoint.
+  - type: web
     name: order-processor
     runtime: docker
     dockerfilePath: ./worker/Dockerfile
     dockerContext: ./worker
+    plan: free
     envVars:
-      - key: RABBITMQ_HOST
-        fromService:
-          name: rabbitmq-internal
-          type: pserv
-          property: host
-      - key: RABBITMQ_PORT
-        value: "5672"
-      - key: RABBITMQ_USER
-        value: guest
-      - key: RABBITMQ_PASS
-        value: guest
-
-  # ── Redis (private — never exposed to the internet) ──────────────────────
-  - type: pserv
-    name: redis-internal
-    runtime: image
-    image:
-      url: redis:7-alpine
-
-  # ── RabbitMQ (private) ───────────────────────────────────────────────────
-  # NOTE: Without a Persistent Disk the queue is in-memory only.
-  # Messages are lost on restart — acceptable for a portfolio POC.
-  # Production fix: attach a Render Persistent Disk and use RabbitMQ's
-  # durable queue + message persistence features.
-  - type: pserv
-    name: rabbitmq-internal
-    runtime: image
-    image:
-      url: rabbitmq:3-management
-    envVars:
-      - key: RABBITMQ_DEFAULT_USER
-        value: guest
-      - key: RABBITMQ_DEFAULT_PASS
-        value: guest
+      - key: RABBITMQ_URL
+        sync: false
