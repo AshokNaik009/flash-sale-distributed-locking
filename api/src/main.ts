@@ -28,9 +28,9 @@ async function acquireLock(itemId: string, lockId: string): Promise<boolean> {
   const result = await redis.set(
     `lock:${itemId}`,
     lockId,
-    "NX",
     "PX",
-    LOCK_TTL_MS
+    LOCK_TTL_MS,
+    "NX"
   );
   return result === "OK";
 }
