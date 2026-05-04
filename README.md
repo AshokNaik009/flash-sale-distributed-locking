@@ -44,6 +44,51 @@ Render's `background_worker` type is paid only. To stay on the free tier, the co
 
 ---
 
+## How a `/buy` actually works
+
+### State in Redis (two keys per item)
+
+```
+lock:sneaker-001        = <random UUID>   ← the turnstile, single owner
+inventory:sneaker-001   = 9               ← the counter
+```
+
+The **lock is one slot per item** (not per request). The UUID is the lock's *value*, used to prove ownership at release time.
+
+### The critical section (what runs while the lock is held)
+
+```
+1. SET lock:item <uuid> PX 10000 NX   ← atomic — only one winner
+   ├─ nil → return 429 (someone else holds it)
+   └─ OK  → continue
+2. GET inventory:item                  → if 0 → return 409 (sold out)
+3. DECR inventory:item                 ← atomic decrement
+4. publish order to CloudAMQP queue    ← uses pooled channel, sub-ms
+5. Lua DEL lock if value still matches
+```
+
+Total time: **~5 ms** (with the AMQP channel pool). Throughput per item ≈ 200 sales/sec.
+
+### The three response codes
+
+| Code | Meaning | What the client should do |
+|---|---|---|
+| `200` | You got a unit; order queued for fulfillment | Show success |
+| `409` | Lock acquired but inventory was 0 | Show "sold out" |
+| `429` | Lost the lock race; never reached inventory | **Retry with backoff** |
+
+The lock is mutual exclusion, **not a queue**. Bounced (429) requests are gone unless the *client* retries — that's how a virtual queue forms outside the server.
+
+### Why the 10-second TTL
+
+Crash safety net — if the lock holder dies before step 5, Redis auto-expires the key after 10 s so other buyers aren't permanently blocked. Happy-path lock-held time is ~5 ms; the 10 s is the worst-case escape hatch.
+
+### Why an async queue (sync vs async split)
+
+Inside the lock we do only fast Redis ops + a tiny publish. The slow stuff (charge card, write DB, send email — seconds each) runs in the worker, **after** the lock is released. The queue is a **durable buffer** between fast inventory decisions and slow fulfillment. If the worker dies, messages pile up; when it restarts, it drains them — customers who got 200 are guaranteed to be fulfilled eventually.
+
+---
+
 ## Run locally
 
 ```bash
