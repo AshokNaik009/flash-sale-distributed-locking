@@ -39,15 +39,39 @@ async function releaseLock(itemId: string, lockId: string): Promise<void> {
   await redis.eval(RELEASE_LOCK_LUA, 1, `lock:${itemId}`, lockId);
 }
 
+// Pooled AMQP channel — opened once at startup and reused across all requests.
+// Without this, each /buy request paid a TLS+AMQP handshake to CloudAMQP
+// (~200 ms RTT), which kept the Redis lock held long enough that concurrent
+// requests almost always lost the race and got 429.
+let channelPromise: Promise<amqplib.Channel> | null = null;
+
+async function getChannel(): Promise<amqplib.Channel> {
+  if (channelPromise) return channelPromise;
+  channelPromise = (async () => {
+    const conn = await amqplib.connect(RABBITMQ_URL);
+    conn.on("error", (err) => {
+      app.log.error({ err }, "[amqp] connection error");
+      channelPromise = null;
+    });
+    conn.on("close", () => {
+      app.log.warn("[amqp] connection closed");
+      channelPromise = null;
+    });
+    const channel = await conn.createChannel();
+    await channel.assertQueue(QUEUE_NAME, { durable: true });
+    app.log.info("[amqp] channel ready");
+    return channel;
+  })();
+  // If the connect fails, clear the cached promise so the next request retries.
+  channelPromise.catch(() => { channelPromise = null; });
+  return channelPromise;
+}
+
 async function publishOrder(order: object): Promise<void> {
-  const conn = await amqplib.connect(RABBITMQ_URL);
-  const channel = await conn.createChannel();
-  await channel.assertQueue(QUEUE_NAME, { durable: true });
+  const channel = await getChannel();
   channel.sendToQueue(QUEUE_NAME, Buffer.from(JSON.stringify(order)), {
     persistent: true,
   });
-  await channel.close();
-  await conn.close();
 }
 
 // ---------------------------------------------------------------------------
@@ -126,4 +150,8 @@ app.listen({ port, host: "0.0.0.0" }, (err) => {
     app.log.error(err);
     process.exit(1);
   }
+  // Pre-warm the AMQP channel so the first /buy request doesn't pay
+  // the connection handshake cost. Failure here is non-fatal — the next
+  // /buy will retry via getChannel().
+  getChannel().catch((e) => app.log.error({ err: e }, "[amqp] warm-up failed"));
 });
